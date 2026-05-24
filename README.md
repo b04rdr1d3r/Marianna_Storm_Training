@@ -1,5 +1,5 @@
 ----
-Marianna Storm Training
+Marianas Storm Training
 by Blue Storm
 ----
 
