@@ -1,86 +1,76 @@
 
 -- Rescue Helo object
-local RescueHelo = RESCUEHELO:New(UNIT:FindByName("CVN-72"), "Planeguard")
+
+-- Ensure CVN-72 exists before starting the script
+local CarrierUnit = UNIT:FindByName("CVN-72")
+if not CarrierUnit then
+    BASE:E("*** ERROR: Unit 'CVN-72' is not found in the DCS Mission Editor! RescueHelo script halted. ***")
+    return
+end
+
+-- Ensure the CarrierOps zone is defined
+local CarrierZone = ZONE:FindByName("CarrierOps")
+if not CarrierZone then
+    BASE:E("*** ERROR: Trigger Zone 'CarrierOps' is not defined in the DCS Mission Editor! RescueHelo script halted. ***")
+    return
+end
+
+local RescueHelo = RESCUEHELO:New(CarrierUnit, "Planeguard")
 RescueHelo:SetRespawnOn()
 RescueHelo:SetTakeoffHot()
 
-local RescueHeloActive = false
-local InactiveTime = 0
-local Timeout = 120 -- seconds
-
-local CarrierZone = ZONE:New("CarrierOps")
-
 -- Spawn the helo initially
 RescueHelo:Start()
-RescueHeloActive = true
 
--- Monitor every 10 seconds
-SCHEDULER:New(nil,
-  function()
+------------------------- code below for the activity monitoring
+-- State variables for monitoring
+local InactiveTime = 0
+local Timeout = 120 -- seconds
+local CheckInterval = 10 -- check every 10 seconds
+local AltitudeLimit = 2000 * 0.3048 -- 2000 feet converted to meters (~609.6m)
 
-    local ActivityDetected = false
+local ClientSet = SET_CLIENT:New()
+ClientSet:FilterCoalitions("blue")
+-- ClientSet:FilterActive()
+ClientSet:FilterStart()
 
-    -- Check all blue aircraft
-    local AirSet = SET_CLIENT:New():FilterCoalitions("blue"):FilterStart()
-
-    AirSet:ForEachClient(
-      function(client)
-
-        local unit = client:GetUnit()
-
-        if unit and unit:IsAlive() then
-
-          local pos = unit:GetVec2()
-
-          if CarrierZone:IsVec2InZone(pos) then
-
-            -- altitude in feet
-            local altft = unit:GetAltitude() * 3.28084
-
-            -- deck movement threshold
-            local speed = unit:GetVelocityKMH()
-
-            if altft < 2000 then
-              ActivityDetected = true
+-- Scheduler to monitor client presence in the CarrierOps zone below 2000 ft
+TIMER:New(function()
+  local clientInZoneBelow2k = false
+ 
+     -- Iterate through active clients
+    ClientSet:ForEachClient(function(client)
+        if client then
+            -- Get the underlying DCS unit wrapper from the client slot
+            if client:IsAlive() and client:IsInZone(CarrierZone) then
+                local alt = client:GetAltitude() -- Altitude MSL in meters
+                if alt <= AltitudeLimit then
+                    clientInZoneBelow2k = true
+                    BASE:I("CarrierOps: Client detected below 2000ft in CarrierOps zone")
+                end
             end
-
-            if speed > 15 then
-              ActivityDetected = true
-            end
-
-          end
         end
-      end
-    )
+    end)
 
-    -- Timer handling
-    if ActivityDetected then
+    if clientInZoneBelow2k then
+        -- Reset inactive timer when client is active in the zone
+        InactiveTime = 0
 
-      InactiveTime = 0
-
-      -- Restart rescue helo if needed
-      if not RescueHeloActive then
-        env.info("RESCUEHELO: Restarting Planeguard")
-
-        RescueHelo:Start()
-        RescueHeloActive = true
-      end
-
+        -- If the helo had previously RTB'd or stopped, restart/respawn it
+        if RescueHelo:IsStopped() or RescueHelo:IsReturning() then
+            BASE:I("CarrierOps: Client detected below 2000ft. Restarting/respawning RescueHelo.")
+            RescueHelo:Start()
+        end
     else
-
-      InactiveTime = InactiveTime + 10
-
-      if InactiveTime >= Timeout and RescueHeloActive then
-
-        env.info("RESCUEHELO: No carrier activity, RTB Planeguard")
-
-        -- Stop the rescue helo system
-        RescueHelo:RTB()
-
-        RescueHeloActive = false
-      end
-
+        -- Increment inactive time if no client is found in the zone below 2000 ft
+        if RescueHelo:IsRunning() and not RescueHelo:IsReturning() then
+            InactiveTime = InactiveTime + CheckInterval
+            -- Trigger RTB if timeout is reached
+            if InactiveTime >= Timeout then
+                BASE:I("CarrierOps: No client detected below 2000ft for " .. Timeout .. " seconds. Sending RescueHelo to RTB.")
+                RescueHelo:Stop()
+                InactiveTime = 0
+            end
+        end
     end
-
-  end,
-{}, 0, 10)
+end):Start(0, CheckInterval)
